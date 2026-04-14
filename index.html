@@ -13,10 +13,10 @@
   .auth-logo{font-family:'DM Mono',monospace;font-size:11px;color:var(--text3);letter-spacing:0.2em;text-transform:uppercase}
   .auth-title{font-size:32px;font-weight:300;letter-spacing:-0.5px}
   .auth-sub{color:var(--text2);font-size:14px;max-width:340px;text-align:center;line-height:1.6}
-  .auth-btn{display:flex;align-items:center;gap:10px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:12px 24px;border-radius:var(--radius);font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;cursor:pointer;transition:all 0.15s;margin-top:8px}
+  .auth-btn{display:flex;align-items:center;gap:10px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:12px 24px;border-radius:var(--radius);font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;cursor:pointer;transition:all 0.15s;margin-top:8px;text-decoration:none}
   .auth-btn:hover{background:var(--surface3);border-color:var(--accent)}
   .auth-btn:disabled{opacity:0.5;cursor:not-allowed}
-  .auth-error{color:var(--red);font-size:13px;max-width:340px;text-align:center;display:none;margin-top:8px}
+  .auth-error{color:var(--red);font-size:13px;max-width:340px;text-align:center;display:none;margin-top:8px;line-height:1.6}
   .app{display:none;flex-direction:column;min-height:100vh}
   .app.visible{display:flex}
   .topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:100;gap:12px;flex-wrap:wrap}
@@ -186,6 +186,7 @@
 
 <script>
 const CLIENT_ID='302975737653-1rk34mimder1jvdm0vr45vmcs3ri1qij.apps.googleusercontent.com';
+const REDIRECT_URI=location.origin+location.pathname;
 const SCOPES='https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/gmail.readonly';
 const FILE_NAME='executive_pipeline.json';
 const STAGES=['Target','Outreach','Scheduled','Talked','In play','Offer','Passed'];
@@ -194,35 +195,57 @@ const LOG_TYPES=['Call','Email','Meeting','LinkedIn','Note'];
 const DEFAULT_THRESHOLDS={Target:14,Outreach:7,Scheduled:5,Talked:7,'In play':5,Offer:7,Passed:9999};
 const AV_COLORS=[['#1a2a4a','#6c8eff'],['#1a3a2a','#3ecf8e'],['#3a1a2a','#b57bee'],['#3a2a1a','#f5a623'],['#2a1a3a','#f25c54'],['#1a3a3a','#5aadff']];
 
-let accessToken=null,driveFileId=null,tokenClient=null,draft=null;
+let accessToken=null,driveFileId=null,draft=null;
 let state={people:[],view:'pipeline',search:'',sortList:'name',showStaleOnly:false,logType:'Note',thresholds:{...DEFAULT_THRESHOLDS}};
 
-function initGoogle(){
-  tokenClient=google.accounts.oauth2.initTokenClient({
-    client_id:CLIENT_ID,scope:SCOPES,
-    callback:handleTokenResponse,
-    error_callback:handleTokenError
+// ── REDIRECT-BASED AUTH ───────────────────────────────────────────────────────
+function signIn(){
+  const params=new URLSearchParams({
+    client_id:CLIENT_ID,
+    redirect_uri:REDIRECT_URI,
+    response_type:'token',
+    scope:SCOPES,
+    include_granted_scopes:'true',
+    state:'signin'
   });
+  location.href='https://accounts.google.com/o/oauth2/v2/auth?'+params.toString();
 }
-function handleTokenResponse(resp){
-  if(resp.error){showAuthError('Sign-in failed: '+resp.error);return;}
-  accessToken=resp.access_token;
-  document.getElementById('authScreen').style.display='none';
-  document.getElementById('app').classList.add('visible');
-  loadFromDrive();
-}
-function handleTokenError(err){showAuthError('Sign-in error: '+(err.message||err.type||'Unknown'));}
-function showAuthError(msg){const el=document.getElementById('authError');el.textContent=msg;el.style.display='block';document.getElementById('signInBtn').disabled=false;}
-function signIn(){document.getElementById('signInBtn').disabled=true;document.getElementById('authError').style.display='none';tokenClient.requestAccessToken({prompt:'consent'});}
-function signOut(){if(accessToken)google.accounts.oauth2.revoke(accessToken,()=>{});accessToken=null;driveFileId=null;state.people=[];document.getElementById('app').classList.remove('visible');document.getElementById('authScreen').style.display='flex';document.getElementById('signInBtn').disabled=false;}
 
+function handleRedirectToken(){
+  // Check URL hash for token (implicit flow redirect)
+  const hash=new URLSearchParams(location.hash.slice(1));
+  const token=hash.get('access_token');
+  if(token){
+    accessToken=token;
+    // Clean the URL
+    history.replaceState(null,'',location.pathname);
+    return true;
+  }
+  // Check sessionStorage for persisted token
+  const stored=sessionStorage.getItem('ep_token');
+  if(stored){
+    accessToken=stored;
+    return true;
+  }
+  return false;
+}
+
+function signOut(){
+  accessToken=null;driveFileId=null;state.people=[];
+  sessionStorage.removeItem('ep_token');
+  document.getElementById('app').classList.remove('visible');
+  document.getElementById('authScreen').style.display='flex';
+}
+
+// ── DRIVE ─────────────────────────────────────────────────────────────────────
 async function apiRequest(url,opts={}){
-  const res=await fetch(url,{...opts,headers:{Authorization:`Bearer ${accessToken}`,  ...(opts.headers||{})}});
-  if(res.status===401){tokenClient.requestAccessToken({prompt:''});throw new Error('Token expired');}
-  if(!res.ok)throw new Error(`API ${res.status}`);
+  const res=await fetch(url,{...opts,headers:{Authorization:`Bearer ${accessToken}`,...(opts.headers||{})}});
+  if(res.status===401){signOut();throw new Error('Token expired - please sign in again');}
+  if(!res.ok)throw new Error(`API ${res.status}: ${await res.text()}`);
   const ct=res.headers.get('content-type')||'';
   return ct.includes('json')?res.json():res.text();
 }
+
 async function findOrCreateFile(){
   const list=await apiRequest(`https://www.googleapis.com/drive/v3/files?q=name='${FILE_NAME}'+and+trashed=false&fields=files(id,name)&spaces=drive`);
   if(list.files&&list.files.length>0){driveFileId=list.files[0].id;return;}
@@ -232,6 +255,7 @@ async function findOrCreateFile(){
   const res=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',headers:{Authorization:`Bearer ${accessToken}`},body:form});
   const data=await res.json();driveFileId=data.id;
 }
+
 async function loadFromDrive(){
   setSyncStatus('syncing','Loading…');
   try{
@@ -244,6 +268,7 @@ async function loadFromDrive(){
     render();
   }catch(e){setSyncStatus('error','Load failed: '+e.message);render();}
 }
+
 async function saveToDrive(){
   if(!driveFileId)return;
   setSyncStatus('syncing','Saving…');
@@ -253,6 +278,7 @@ async function saveToDrive(){
   }catch(e){setSyncStatus('error','Save failed');}
 }
 
+// ── GMAIL ─────────────────────────────────────────────────────────────────────
 async function syncGmail(){
   if(!accessToken)return;
   const btn=document.getElementById('gmailBtn');btn.disabled=true;
@@ -289,6 +315,7 @@ async function syncGmail(){
   btn.disabled=false;
 }
 
+// ── HELPERS ───────────────────────────────────────────────────────────────────
 function setSyncStatus(type,text){const dot=document.getElementById('syncDot');const txt=document.getElementById('syncText');if(!dot)return;dot.className='sync-dot'+(type==='syncing'?' syncing':type==='error'?' error':'');txt.textContent=text;}
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function initials(n){return(n||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();}
@@ -400,7 +427,6 @@ function renderModal(){
   const sa=stageAge(draft);const ss=staleStatus(draft);
   const saTag=sa!==null?`<span class="tag ${ss==='over'?'red':ss==='warn'?'amber':'green'}">${sa===0?'Today':sa+'d'} in ${esc(draft.stage)}</span>`:'';
   const logHtml=(draft.log||[]).length?(draft.log||[]).map(l=>`<div class="log-entry"><div class="log-entry-head"><div style="display:flex;align-items:center;gap:8px"><span class="log-badge lt-${l.type.toLowerCase()}">${l.type}${l.auto?' · auto':''}</span><span style="font-size:11px;color:var(--text3)">${fmt(l.date)}</span></div>${!l.auto?`<button class="btn sm danger" onclick="deleteLog('${l.id}')">×</button>`:''}</div><div class="log-text">${esc(l.text)}</div></div>`).join(''):'<div class="empty" style="padding:16px 0">No activity yet</div>';
-
   document.getElementById('modal').innerHTML=`
     <div class="modal-header"><div class="modal-title">${isNew?'Add person':'Edit person'}</div><button class="btn sm ghost" onclick="closeModal()">✕</button></div>
     ${!isNew?`<div class="person-hero"><div class="avatar" style="${avStyle(draft.name||'?',48)}">${initials(draft.name||'?')}</div><div style="flex:1"><div style="font-size:20px;font-weight:500;letter-spacing:-0.3px">${esc(draft.name)||'Unnamed'}</div><div style="font-size:13px;color:var(--text2);margin-top:2px">${esc([draft.title,draft.company].filter(Boolean).join(' · '))}</div><div class="person-flags">${saTag}<button class="btn sm ${draft.followUp?'primary':''}" onclick="draftToggle('followUp')">Follow-up${draft.followUp?' ✓':''}</button><button class="btn sm ${draft.priority==='hot'?'primary':''}" onclick="draftTogglePriority('hot')">Hot</button><button class="btn sm ${draft.priority==='cold'?'primary':''}" onclick="draftTogglePriority('cold')">Cold</button></div></div></div>`:''}
@@ -426,7 +452,17 @@ function submitLog(){const el=document.getElementById('logText');const dl=docume
 function deleteLog(lid){draft.log=(draft.log||[]).filter(l=>l.id!==lid);const p=state.people.find(x=>x.id===draft.id);if(p)p.log=draft.log;saveToDrive();renderModal();}
 function exportCSV(){const headers=['Name','Title','Company','Email','Phone','LinkedIn','Stage','Days in Stage','Interview Stage','Priority','Follow Up','Last Contact','Next Step','Next Step Due','Notes'];const rows=state.people.map(p=>[p.name,p.title,p.company,p.email,p.phone,p.linkedin,p.stage,stageAge(p)??'',p.interviewStage,p.priority,p.followUp?'Yes':'',p.lastContact?new Date(p.lastContact).toLocaleDateString():'',p.nextStepNote,p.nextStepDate?new Date(p.nextStepDate).toLocaleDateString():'',p.notes].map(v=>`"${(v??'').toString().replace(/"/g,'""')}"`).join(','));const csv=[headers.join(','),...rows].join('\n');const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);a.download='executive_pipeline.csv';a.click();}
 
-window.addEventListener('load',()=>{const s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';s.async=true;s.defer=true;s.onload=initGoogle;s.onerror=()=>showAuthError('Failed to load Google sign-in. Check your internet connection.');document.head.appendChild(s);});
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+window.addEventListener('load',()=>{
+  // Handle redirect callback with token in URL hash
+  if(handleRedirectToken()){
+    // Store token for this session
+    sessionStorage.setItem('ep_token',accessToken);
+    document.getElementById('authScreen').style.display='none';
+    document.getElementById('app').classList.add('visible');
+    loadFromDrive();
+  }
+});
 </script>
 </body>
 </html>
